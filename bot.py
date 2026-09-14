@@ -3,7 +3,7 @@ Bot de Telegram - Información de fútbol (LaLiga, Premier, Serie A, Bundesliga)
 --------------------------------------------------------------------------
 Qué hace:
   /partidos      -> partidos de hoy en las 4 ligas
-  /partidos manana -> partidos de mañana
+  /partidosmanana -> partidos de mañana
   /alineaciones <id_partido> -> alineación oficial si ya está publicada
   /lesiones <equipo> -> bajas conocidas de un equipo
   /seguir <id_partido> -> te avisa automáticamente en cuanto se publique
@@ -21,8 +21,17 @@ publicadas y lesiones confirmadas por fuentes públicas.
 import os
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
+
+MADRID_TZ = ZoneInfo("Europe/Madrid")
+
+
+def ahora_madrid():
+    """Fecha/hora actual en la zona horaria de España, sin importar
+    en qué zona horaria esté el servidor donde corre el bot."""
+    return datetime.now(MADRID_TZ)
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -154,7 +163,7 @@ async def ligas(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def partidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dia = "manana" if context.args and context.args[0].lower() in ("manana", "mañana") else "hoy"
-    fecha = datetime.now() + timedelta(days=1 if dia == "manana" else 0)
+    fecha = ahora_madrid() + timedelta(days=1 if dia == "manana" else 0)
     fecha_str = fecha.strftime("%Y-%m-%d")
 
     await update.message.reply_text("🔎 Buscando partidos...")
@@ -166,7 +175,7 @@ async def partidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lineas = [f"⚽ Partidos del {fecha_str}:\n"]
     for p in partidos_list:
-        hora_local = datetime.fromisoformat(p["hora"]).strftime("%H:%M")
+                hora_local = datetime.fromisoformat(p["hora"]).astimezone(MADRID_TZ).strftime("%H:%M")
         lineas.append(f"[{p['id']}] {hora_local} · {p['liga']}\n{p['local']} vs {p['visitante']}\n")
     lineas.append("\nUsa /alineaciones <id> o /seguir <id> con el número entre corchetes.")
     await update.message.reply_text("\n".join(lineas))
