@@ -175,7 +175,7 @@ async def partidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lineas = [f"⚽ Partidos del {fecha_str}:\n"]
     for p in partidos_list:
-                hora_local = datetime.fromisoformat(p["hora"]).astimezone(MADRID_TZ).strftime("%H:%M")
+        hora_local = datetime.fromisoformat(p["hora"]).astimezone(MADRID_TZ).strftime("%H:%M")
         lineas.append(f"[{p['id']}] {hora_local} · {p['liga']}\n{p['local']} vs {p['visitante']}\n")
     lineas.append("\nUsa /alineaciones <id> o /seguir <id> con el número entre corchetes.")
     await update.message.reply_text("\n".join(lineas))
