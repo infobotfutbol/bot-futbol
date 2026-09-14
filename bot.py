@@ -3,7 +3,7 @@ Bot de Telegram - Información de fútbol (LaLiga, Premier, Serie A, Bundesliga)
 --------------------------------------------------------------------------
 Qué hace:
   /partidos      -> partidos de hoy en las 4 ligas
-  /partidosmanana -> partidos de mañana
+  /partidos manana -> partidos de mañana
   /alineaciones <id_partido> -> alineación oficial si ya está publicada
   /lesiones <equipo> -> bajas conocidas de un equipo
   /seguir <id_partido> -> te avisa automáticamente en cuanto se publique
