@@ -1,21 +1,27 @@
 """
-Bot de Telegram - Información de fútbol (LaLiga, Premier, Serie A, Bundesliga)
+Bot de Telegram - Información y análisis de fútbol
+(LaLiga, Premier, Serie A, Bundesliga, Primeira Liga)
 --------------------------------------------------------------------------
-Qué hace:
-  /partidos      -> partidos de hoy en las 4 ligas
-  /partidos manana -> partidos de mañana
-  /alineaciones <id_partido> -> alineación oficial si ya está publicada
-  /lesiones <equipo> -> bajas conocidas de un equipo
-  /seguir <id_partido> -> te avisa automáticamente en cuanto se publique
-                          la alineación oficial de ese partido
-  /ligas         -> lista los IDs de las 4 ligas que sigue el bot
+Comandos:
+  /partidos            -> partidos de hoy en las 5 ligas, marcando ⚡ los que
+                           tienen gran diferencia de clasificación
+  /partidos manana      -> lo mismo, para mañana
+  /diferencia <id>      -> detalle de la diferencia de clasificación de un partido
+  /cuotas <equipo>       -> compara cuotas 1X2 de varias casas para el próximo
+                           partido de ese equipo
+  /alineaciones <id>    -> alineación oficial (si el plan de datos la incluye)
+  /lesiones <equipo>     -> bajas conocidas (requiere plan de pago, ver aviso)
+  /seguir <id>           -> avisa en cuanto se publique la alineación oficial
+  /ligas                 -> ligas que sigue el bot
 
-Fuente de datos: API-Football (https://www.api-football.com/) - tiene plan
-gratuito (100 peticiones/día) suficiente para uso personal.
+Fuentes de datos:
+  - Partidos y clasificación: football-data.org (plan gratuito)
+  - Cuotas: the-odds-api.com (plan gratuito, 500 peticiones/mes)
 
 NADA de esto usa datos en directo del partido ni fuentes con ventaja de
-tiempo sobre las casas de apuestas: solo calendario, alineaciones oficiales
-publicadas y lesiones confirmadas por fuentes públicas.
+tiempo sobre las casas de apuestas: solo calendario, clasificación pública,
+cuotas pre-partido publicadas por las propias casas, y alineaciones
+oficiales ya confirmadas.
 """
 
 import os
@@ -24,30 +30,29 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 MADRID_TZ = ZoneInfo("Europe/Madrid")
 
 
 def ahora_madrid():
-    """Fecha/hora actual en la zona horaria de España, sin importar
-    en qué zona horaria esté el servidor donde corre el bot."""
+    """Fecha/hora actual en la zona horaria de España, sin importar en qué
+    zona horaria esté el servidor donde corre el bot."""
     return datetime.now(MADRID_TZ)
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    JobQueue,
-)
+
 
 # ---------------------------------------------------------------------
-# CONFIGURACIÓN — rellena estos dos valores (ver README.md paso 1 y 2)
+# CONFIGURACIÓN — rellena estos tres valores (ver README.md)
 # ---------------------------------------------------------------------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "PON_AQUI_TU_TOKEN")
-API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "PON_AQUI_TU_API_KEY")
+FOOTBALL_DATA_KEY = os.environ.get("API_FOOTBALL_KEY", "PON_AQUI_TU_API_KEY")
+ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "PON_AQUI_TU_ODDS_API_KEY")
 
-API_BASE = "https://api.football-data.org/v4"
-HEADERS = {"X-Auth-Token": API_FOOTBALL_KEY}
+FD_BASE = "https://api.football-data.org/v4"
+FD_HEADERS = {"X-Auth-Token": FOOTBALL_DATA_KEY}
+
+ODDS_BASE = "https://api.the-odds-api.com/v4"
 
 # Códigos de competición en football-data.org
 LIGAS = {
@@ -55,7 +60,21 @@ LIGAS = {
     "Premier League": "PL",
     "Serie A": "SA",
     "Bundesliga": "BL1",
+    "Primeira Liga": "PPL",
 }
+
+# Códigos de deporte/liga en The Odds API (para /cuotas)
+ODDS_SPORT_KEYS = {
+    "LaLiga": "soccer_spain_la_liga",
+    "Premier League": "soccer_epl",
+    "Serie A": "soccer_italy_serie_a",
+    "Bundesliga": "soccer_germany_bundesliga",
+    "Primeira Liga": "soccer_portugal_primeira_liga",
+}
+
+# Umbral de puestos de diferencia en la tabla para considerar un partido
+# "con gran diferencia deportiva". Ajusta este número a tu gusto.
+UMBRAL_DIFERENCIA = 8
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -69,16 +88,16 @@ SEGUIMIENTOS = {}
 
 
 # ---------------------------------------------------------------------
-# FUNCIONES AUXILIARES DE API-FOOTBALL
+# FOOTBALL-DATA.ORG — partidos y clasificación
 # ---------------------------------------------------------------------
 def get_fixtures(date_str: str):
-    """Devuelve la lista de partidos de las 4 ligas para una fecha dada."""
+    """Devuelve la lista de partidos de las 5 ligas para una fecha dada."""
     partidos = []
     for nombre_liga, codigo in LIGAS.items():
         try:
             resp = requests.get(
-                f"{API_BASE}/competitions/{codigo}/matches",
-                headers=HEADERS,
+                f"{FD_BASE}/competitions/{codigo}/matches",
+                headers=FD_HEADERS,
                 params={"dateFrom": date_str, "dateTo": date_str},
                 timeout=15,
             )
@@ -89,22 +108,41 @@ def get_fixtures(date_str: str):
                     {
                         "id": p["id"],
                         "liga": nombre_liga,
+                        "liga_codigo": codigo,
                         "hora": p["utcDate"],
                         "local": p["homeTeam"]["name"],
                         "visitante": p["awayTeam"]["name"],
                     }
                 )
         except Exception as e:
-            logger.warning(f"Error consultando {nombre_liga}: {e}")
+            logger.warning(f"Error consultando partidos de {nombre_liga}: {e}")
     return partidos
 
 
-def get_lineup(fixture_id: int):
-    """El plan gratuito de football-data.org no incluye alineaciones
-    (onceXI). Se deja la función lista por si en el futuro se amplía
-    a un plan de pago que sí las incluya."""
+def get_standings(codigo_liga: str):
+    """Devuelve {nombre_equipo: posicion} para una liga."""
     try:
-        resp = requests.get(f"{API_BASE}/matches/{fixture_id}", headers=HEADERS, timeout=15)
+        resp = requests.get(
+            f"{FD_BASE}/competitions/{codigo_liga}/standings", headers=FD_HEADERS, timeout=15
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        tabla = {}
+        for grupo in data.get("standings", []):
+            if grupo.get("type") != "TOTAL":
+                continue
+            for fila in grupo.get("table", []):
+                tabla[fila["team"]["name"]] = fila["position"]
+        return tabla
+    except Exception as e:
+        logger.warning(f"Error consultando clasificación de {codigo_liga}: {e}")
+        return {}
+
+
+def get_lineup(fixture_id: int):
+    """El plan gratuito de football-data.org no siempre incluye alineaciones."""
+    try:
+        resp = requests.get(f"{FD_BASE}/matches/{fixture_id}", headers=FD_HEADERS, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         home_lineup = data.get("homeTeam", {}).get("lineup", [])
@@ -120,11 +158,37 @@ def get_lineup(fixture_id: int):
         return []
 
 
-def get_injuries(team_name: str):
-    """football-data.org (plan gratuito) no ofrece endpoint de lesiones.
-    Se deja la función para mantener el comando, pero avisa de la limitación
-    en vez de fallar en silencio."""
-    return None, []
+# ---------------------------------------------------------------------
+# THE ODDS API — comparador de cuotas
+# ---------------------------------------------------------------------
+def get_odds_for_team(team_query: str):
+    """Busca el próximo partido de un equipo (por nombre parcial) en
+    cualquiera de las 5 ligas y devuelve las cuotas 1X2 de cada casa."""
+    team_query_lower = team_query.lower()
+    for nombre_liga, sport_key in ODDS_SPORT_KEYS.items():
+        try:
+            resp = requests.get(
+                f"{ODDS_BASE}/sports/{sport_key}/odds",
+                params={
+                    "apiKey": ODDS_API_KEY,
+                    "regions": "eu",
+                    "markets": "h2h",
+                    "oddsFormat": "decimal",
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            eventos = resp.json()
+        except Exception as e:
+            logger.warning(f"Error consultando cuotas de {nombre_liga}: {e}")
+            continue
+
+        for ev in eventos:
+            local = ev.get("home_team", "")
+            visitante = ev.get("away_team", "")
+            if team_query_lower in local.lower() or team_query_lower in visitante.lower():
+                return nombre_liga, local, visitante, ev.get("bookmakers", [])
+    return None, None, None, []
 
 
 # ---------------------------------------------------------------------
@@ -132,13 +196,15 @@ def get_injuries(team_name: str):
 # ---------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Hola. Soy tu bot de información de fútbol.\n\n"
+        "👋 Hola. Soy tu bot de análisis de fútbol.\n\n"
         "Comandos disponibles:\n"
-        "/partidos - partidos de hoy\n"
+        "/partidos - partidos de hoy (⚡ = gran diferencia de clasificación)\n"
         "/partidos manana - partidos de mañana\n"
-        "/alineaciones <id> - alineación oficial de un partido\n"
-        "/lesiones <equipo> - bajas confirmadas de un equipo\n"
-        "/seguir <id> - te aviso en cuanto salga la alineación oficial\n"
+        "/diferencia <id> - detalle de la diferencia de un partido\n"
+        "/cuotas <equipo> - compara cuotas de varias casas\n"
+        "/alineaciones <id> - alineación oficial si está disponible\n"
+        "/lesiones <equipo> - bajas conocidas\n"
+        "/seguir <id> - te aviso cuando salga la alineación oficial\n"
         "/ligas - ligas que sigo"
     )
 
@@ -153,18 +219,117 @@ async def partidos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fecha = ahora_madrid() + timedelta(days=1 if dia == "manana" else 0)
     fecha_str = fecha.strftime("%Y-%m-%d")
 
-    await update.message.reply_text("🔎 Buscando partidos...")
+    await update.message.reply_text("🔎 Buscando partidos y comparando clasificaciones...")
     partidos_list = get_fixtures(fecha_str)
 
     if not partidos_list:
-        await update.message.reply_text(f"No hay partidos de las 4 ligas el {fecha_str}.")
+        await update.message.reply_text(f"No hay partidos de las 5 ligas el {fecha_str}.")
         return
+
+    # Cachea la clasificación de cada liga para no pedirla partido a partido
+    tablas_cache = {}
+    for codigo in set(p["liga_codigo"] for p in partidos_list):
+        tablas_cache[codigo] = get_standings(codigo)
 
     lineas = [f"⚽ Partidos del {fecha_str}:\n"]
     for p in partidos_list:
         hora_local = datetime.fromisoformat(p["hora"]).astimezone(MADRID_TZ).strftime("%H:%M")
-        lineas.append(f"[{p['id']}] {hora_local} · {p['liga']}\n{p['local']} vs {p['visitante']}\n")
-    lineas.append("\nUsa /alineaciones <id> o /seguir <id> con el número entre corchetes.")
+        tabla = tablas_cache.get(p["liga_codigo"], {})
+        pos_local = tabla.get(p["local"])
+        pos_visit = tabla.get(p["visitante"])
+
+        marca = ""
+        detalle_pos = ""
+        if pos_local and pos_visit:
+            diff = abs(pos_local - pos_visit)
+            detalle_pos = f" ({pos_local}º vs {pos_visit}º)"
+            if diff >= UMBRAL_DIFERENCIA:
+                marca = " ⚡"
+
+        lineas.append(
+            f"[{p['id']}] {hora_local} · {p['liga']}{marca}\n"
+            f"{p['local']} vs {p['visitante']}{detalle_pos}\n"
+        )
+    lineas.append(
+        "\n⚡ = diferencia de clasificación ≥ "
+        f"{UMBRAL_DIFERENCIA} puestos.\n"
+        "Usa /diferencia <id>, /cuotas <equipo>, /alineaciones <id> o /seguir <id>."
+    )
+    await update.message.reply_text("\n".join(lineas))
+
+
+async def diferencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Uso: /diferencia <id_partido>  (usa /partidos para ver los IDs)")
+        return
+    fixture_id = int(context.args[0])
+
+    try:
+        resp = requests.get(f"{FD_BASE}/matches/{fixture_id}", headers=FD_HEADERS, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        await update.message.reply_text(f"No pude consultar ese partido: {e}")
+        return
+
+    codigo_liga = data.get("competition", {}).get("code")
+    local = data["homeTeam"]["name"]
+    visitante = data["awayTeam"]["name"]
+    tabla = get_standings(codigo_liga) if codigo_liga else {}
+    pos_local = tabla.get(local, "?")
+    pos_visit = tabla.get(visitante, "?")
+
+    texto = (
+        f"📊 {local} vs {visitante}\n\n"
+        f"{local}: {pos_local}º\n"
+        f"{visitante}: {pos_visit}º\n"
+    )
+    if isinstance(pos_local, int) and isinstance(pos_visit, int):
+        diff = abs(pos_local - pos_visit)
+        texto += f"\nDiferencia: {diff} puestos"
+        if diff >= UMBRAL_DIFERENCIA:
+            texto += " ⚡ (gran diferencia deportiva)"
+    await update.message.reply_text(texto)
+
+
+async def cuotas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Uso: /cuotas <equipo>  (ej. /cuotas Elche)")
+        return
+    equipo = " ".join(context.args)
+    await update.message.reply_text(f"🔎 Buscando cuotas para {equipo}...")
+
+    liga, local, visitante, bookmakers = get_odds_for_team(equipo)
+    if not bookmakers:
+        await update.message.reply_text(
+            "No encontré cuotas para ese equipo. Puede que no tenga partido "
+            "próximo en las 5 ligas, o que el nombre no coincida — prueba con "
+            "el nombre en inglés (ej. 'Real Madrid', 'Bayern Munich')."
+        )
+        return
+
+    lineas = [f"💰 Cuotas {local} vs {visitante} ({liga}):\n"]
+    mejor_local, mejor_empate, mejor_visit = 0, 0, 0
+    for bk in bookmakers:
+        nombre_casa = bk.get("title", "?")
+        for market in bk.get("markets", []):
+            if market["key"] != "h2h":
+                continue
+            precios = {o["name"]: o["price"] for o in market["outcomes"]}
+            c_local = precios.get(local, "-")
+            c_empate = precios.get("Draw", "-")
+            c_visit = precios.get(visitante, "-")
+            lineas.append(f"{nombre_casa}: 1={c_local}  X={c_empate}  2={c_visit}")
+            if isinstance(c_local, (int, float)):
+                mejor_local = max(mejor_local, c_local)
+            if isinstance(c_empate, (int, float)):
+                mejor_empate = max(mejor_empate, c_empate)
+            if isinstance(c_visit, (int, float)):
+                mejor_visit = max(mejor_visit, c_visit)
+
+    lineas.append(
+        f"\n🏆 Mejor cuota disponible: 1={mejor_local}  X={mejor_empate}  2={mejor_visit}"
+    )
     await update.message.reply_text("\n".join(lineas))
 
 
@@ -238,11 +403,12 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("ligas", ligas))
     app.add_handler(CommandHandler("partidos", partidos))
+    app.add_handler(CommandHandler("diferencia", diferencia))
+    app.add_handler(CommandHandler("cuotas", cuotas))
     app.add_handler(CommandHandler("alineaciones", alineaciones))
     app.add_handler(CommandHandler("lesiones", lesiones))
     app.add_handler(CommandHandler("seguir", seguir))
 
-    # revisa seguimientos cada 5 minutos
     app.job_queue.run_repeating(revisar_seguimientos, interval=300, first=10)
 
     logger.info("Bot iniciado. Esperando comandos...")
