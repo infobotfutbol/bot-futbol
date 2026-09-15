@@ -17,9 +17,19 @@ Sigue estos pasos en orden. No necesitas saber programar, solo copiar y pegar.
 
 ## PASO 2 — Conseguir acceso a los datos de fútbol (gratis)
 
-1. Ve a **https://www.api-football.com/** y crea una cuenta gratuita
-   (plan "Free", 100 peticiones al día — de sobra para uso personal).
-2. En tu panel (dashboard) verás una **API Key** — cópiala.
+1. Ve a **https://www.football-data.org/client/register** y crea una cuenta gratuita.
+2. Te enviarán tu **API Token** al email — cópialo. (Antes usábamos API-Football,
+   pero su plan gratuito solo da datos de temporadas 2022-2024, no de la
+   temporada actual — por eso cambiamos a football-data.org.)
+
+**Aviso sobre límites del plan gratuito de football-data.org:**
+- Cubre las 4 ligas que sigues (LaLiga, Premier, Serie A, Bundesliga) ✅
+- Límite de 10 peticiones por minuto — de sobra para uso personal
+- **No incluye alineaciones ni lesiones** en el plan gratuito. El comando
+  `/partidos` funcionará perfectamente; `/alineaciones` y `/lesiones`
+  seguirán ahí pero te avisarán de que esa información requiere un plan
+  de pago (o podemos añadir más adelante una alternativa basada en
+  búsqueda de noticias, que sí es gratis pero algo más lenta).
 
 ---
 
@@ -71,7 +81,7 @@ más sencilla y gratuita para empezar es **Railway** (railway.app):
 4. Railway detectará que es un proyecto Python. Antes de que arranque, ve a
    la pestaña **Variables** y añade:
    - `TELEGRAM_TOKEN` = tu token de BotFather
-   - `API_FOOTBALL_KEY` = tu clave de API-Football
+   - `API_FOOTBALL_KEY` = tu API Token de football-data.org
 
    (Esto es más seguro que escribirlas directamente en el código — el bot
    ya está preparado para leerlas de ahí automáticamente.)
