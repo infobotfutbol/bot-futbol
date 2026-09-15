@@ -46,15 +46,15 @@ from telegram.ext import (
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "PON_AQUI_TU_TOKEN")
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "PON_AQUI_TU_API_KEY")
 
-API_BASE = "https://v3.football.api-sports.io"
-HEADERS = {"x-apisports-key": API_FOOTBALL_KEY}
+API_BASE = "https://api.football-data.org/v4"
+HEADERS = {"X-Auth-Token": API_FOOTBALL_KEY}
 
-# IDs de liga en API-Football
+# Códigos de competición en football-data.org
 LIGAS = {
-    "LaLiga": 140,
-    "Premier League": 39,
-    "Serie A": 135,
-    "Bundesliga": 78,
+    "LaLiga": "PD",
+    "Premier League": "PL",
+    "Serie A": "SA",
+    "Bundesliga": "BL1",
 }
 
 logging.basicConfig(
@@ -74,24 +74,24 @@ SEGUIMIENTOS = {}
 def get_fixtures(date_str: str):
     """Devuelve la lista de partidos de las 4 ligas para una fecha dada."""
     partidos = []
-    for nombre_liga, liga_id in LIGAS.items():
+    for nombre_liga, codigo in LIGAS.items():
         try:
             resp = requests.get(
-                f"{API_BASE}/fixtures",
+                f"{API_BASE}/competitions/{codigo}/matches",
                 headers=HEADERS,
-                params={"league": liga_id, "season": datetime.now().year, "date": date_str},
+                params={"dateFrom": date_str, "dateTo": date_str},
                 timeout=15,
             )
             resp.raise_for_status()
-            data = resp.json().get("response", [])
+            data = resp.json().get("matches", [])
             for p in data:
                 partidos.append(
                     {
-                        "id": p["fixture"]["id"],
+                        "id": p["id"],
                         "liga": nombre_liga,
-                        "hora": p["fixture"]["date"],
-                        "local": p["teams"]["home"]["name"],
-                        "visitante": p["teams"]["away"]["name"],
+                        "hora": p["utcDate"],
+                        "local": p["homeTeam"]["name"],
+                        "visitante": p["awayTeam"]["name"],
                     }
                 )
         except Exception as e:
@@ -100,44 +100,31 @@ def get_fixtures(date_str: str):
 
 
 def get_lineup(fixture_id: int):
+    """El plan gratuito de football-data.org no incluye alineaciones
+    (onceXI). Se deja la función lista por si en el futuro se amplía
+    a un plan de pago que sí las incluya."""
     try:
-        resp = requests.get(
-            f"{API_BASE}/fixtures/lineups",
-            headers=HEADERS,
-            params={"fixture": fixture_id},
-            timeout=15,
-        )
+        resp = requests.get(f"{API_BASE}/matches/{fixture_id}", headers=HEADERS, timeout=15)
         resp.raise_for_status()
-        return resp.json().get("response", [])
+        data = resp.json()
+        home_lineup = data.get("homeTeam", {}).get("lineup", [])
+        away_lineup = data.get("awayTeam", {}).get("lineup", [])
+        if not home_lineup and not away_lineup:
+            return []
+        return [
+            {"team": data["homeTeam"], "lineup": home_lineup},
+            {"team": data["awayTeam"], "lineup": away_lineup},
+        ]
     except Exception as e:
         logger.warning(f"Error consultando alineaciones: {e}")
         return []
 
 
 def get_injuries(team_name: str):
-    try:
-        # Primero buscamos el ID del equipo por nombre
-        resp = requests.get(
-            f"{API_BASE}/teams", headers=HEADERS, params={"search": team_name}, timeout=15
-        )
-        resp.raise_for_status()
-        teams = resp.json().get("response", [])
-        if not teams:
-            return None, []
-        team_id = teams[0]["team"]["id"]
-        team_full_name = teams[0]["team"]["name"]
-
-        resp2 = requests.get(
-            f"{API_BASE}/injuries",
-            headers=HEADERS,
-            params={"team": team_id, "season": datetime.now().year},
-            timeout=15,
-        )
-        resp2.raise_for_status()
-        return team_full_name, resp2.json().get("response", [])
-    except Exception as e:
-        logger.warning(f"Error consultando lesiones: {e}")
-        return None, []
+    """football-data.org (plan gratuito) no ofrece endpoint de lesiones.
+    Se deja la función para mantener el comando, pero avisa de la limitación
+    en vez de fallar en silencio."""
+    return None, []
 
 
 # ---------------------------------------------------------------------
@@ -188,37 +175,28 @@ async def alineaciones(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fixture_id = context.args[0]
     data = get_lineup(fixture_id)
     if not data:
-        await update.message.reply_text("Aún no hay alineación oficial publicada para este partido.")
+        await update.message.reply_text(
+            "Aún no hay alineación oficial publicada, o el plan gratuito de la "
+            "API no incluye alineaciones para este partido."
+        )
         return
 
     lineas = []
     for equipo in data:
         nombre = equipo["team"]["name"]
-        formacion = equipo.get("formation", "?")
-        titulares = ", ".join(j["player"]["name"] for j in equipo.get("startXI", []))
-        lineas.append(f"🔹 {nombre} ({formacion})\n{titulares}\n")
+        titulares = ", ".join(j.get("name", "?") for j in equipo.get("lineup", []))
+        lineas.append(f"🔹 {nombre}\n{titulares}\n")
     await update.message.reply_text("\n".join(lineas))
 
 
 async def lesiones(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Uso: /lesiones <nombre_equipo>  (ej. /lesiones Real Madrid)")
-        return
-    equipo_nombre = " ".join(context.args)
-    nombre_completo, data = get_injuries(equipo_nombre)
-    if not nombre_completo:
-        await update.message.reply_text("No encontré ese equipo. Prueba con el nombre en inglés/oficial.")
-        return
-    if not data:
-        await update.message.reply_text(f"No hay bajas registradas para {nombre_completo} ahora mismo.")
-        return
-
-    lineas = [f"🚑 Bajas de {nombre_completo}:\n"]
-    for inj in data:
-        jugador = inj["player"]["name"]
-        motivo = inj["player"].get("reason", "Sin especificar")
-        lineas.append(f"• {jugador} — {motivo}")
-    await update.message.reply_text("\n".join(lineas))
+    await update.message.reply_text(
+        "⚠️ El plan gratuito de la API de datos que usa este bot no incluye "
+        "un listado de lesiones. Para tenerlo habría que:\n"
+        "1) contratar un plan de pago de una API que sí lo incluya, o\n"
+        "2) añadir búsqueda de noticias (más lento, pero gratis).\n\n"
+        "Dile a Claude si quieres que añadamos la opción 2."
+    )
 
 
 async def seguir(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -245,9 +223,8 @@ async def revisar_seguimientos(context: ContextTypes.DEFAULT_TYPE):
             lineas = [f"📋 ¡Alineación oficial publicada! (partido {fixture_id})\n"]
             for equipo in data:
                 nombre = equipo["team"]["name"]
-                formacion = equipo.get("formation", "?")
-                titulares = ", ".join(j["player"]["name"] for j in equipo.get("startXI", []))
-                lineas.append(f"🔹 {nombre} ({formacion})\n{titulares}\n")
+                titulares = ", ".join(j.get("name", "?") for j in equipo.get("lineup", []))
+                lineas.append(f"🔹 {nombre}\n{titulares}\n")
             await context.bot.send_message(chat_id=info["chat_id"], text="\n".join(lineas))
             info["avisado"] = True
 
